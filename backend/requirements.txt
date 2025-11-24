@@ -1,0 +1,22 @@
+# --- Backend ---
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+
+# --- ML Model & Features ---
+pandas
+numpy
+scikit-learn
+catboost
+joblib
+ta
+optuna
+
+# --- Azure OpenAI & RAG ---
+openai
+azure-identity
+azure-search-documents
+
+# --- Utilities ---
+requests
