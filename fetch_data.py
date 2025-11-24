@@ -2,6 +2,7 @@ import pandas as pd
 import yfinance as yf
 import feedparser
 import ta
+import numpy as np
 def fetch_stock_data(ticker, start_date, end_date):
     """
     Fetch historical stock data for a given ticker symbol from Yahoo Finance.
@@ -18,7 +19,7 @@ def fetch_stock_data(ticker, start_date, end_date):
 
     df.to_csv(f"data/{ticker}_data.csv")
 
-    preprocess_stock_data(ticker)
+    preprocess_for_model(ticker)
     return f"Data for {ticker} from {start_date} to {end_date} saved to data/{ticker}_data.csv"
 
 def fetch_rss_feed(feed_urls):
@@ -44,53 +45,67 @@ def fetch_rss_feed(feed_urls):
                 'summary': entry.summary
             })
     df_news = pd.DataFrame(articles)
-    df_news.to_csv("data/news_raw.csv",index=False)
-    return f"RSS feed data saved to data/news_raw.csv"
+    df_news.to_csv("data/news.csv",index=False)
+    return f"RSS feed data saved to data/news.csv"
 
-def preprocess_stock_data(ticker):
+def preprocess_for_model(df, ticker_name="SENSEX"):
     """
-    Preprocess stock data for machine learning.
-
-    Parameters:
-    ticker (str): The stock ticker symbol.
-
-    Returns:
-    pd.DataFrame: A DataFrame containing the preprocessed stock data.
+    df must already contain: date, open, high, low, close, volume
+    Returns a single-row dataframe with ALL features required by ML model.
     """
-    df = pd.read_csv(f"data/{ticker}_data.csv", skiprows=2)
-    df.columns = ["date", "close", "high", "low", "open", "volume"]
-    df["date"] = pd.to_datetime(df["date"])
-    df = df.sort_values("date")
-    df.reset_index(drop=True, inplace=True)
+
+    df = df.copy()
+
+    # Base returns
     df["return_1d"] = df["close"].pct_change()
     df["return_7d"] = df["close"].pct_change(7)
 
-    # RSI
-    df["rsi_14"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
+    # Lag features
+    for lag in [1, 2, 3, 5]:
+        df[f"close_lag_{lag}"] = df["close"].shift(lag)
+        df[f"volume_lag_{lag}"] = df["volume"].shift(lag)
 
-    # EMA
+    # Rolling means
+    for w in [3,5,7,10,14]:
+        df[f"roll_mean_{w}"] = df["close"].rolling(w).mean()
+        df[f"roll_std_{w}"] = df["close"].rolling(w).std()
+        df[f"roll_vol_{w}"] = df["volume"].rolling(w).std()
+
+    # ROC
+    df["roc_5"] = df["close"].pct_change(5)
+    df["roc_10"] = df["close"].pct_change(10)
+
+    # Momentum
+    df["momentum"] = df["close"] - df["close"].shift(10)
+
+    # Technical Indicators
+    df["rsi_14"] = ta.momentum.RSIIndicator(df["close"], window=14).rsi()
     df["ema_20"] = ta.trend.EMAIndicator(df["close"], window=20).ema_indicator()
     df["ema_50"] = ta.trend.EMAIndicator(df["close"], window=50).ema_indicator()
-
-    # MACD
+    
     macd = ta.trend.MACD(df["close"])
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
     df["macd_hist"] = macd.macd_diff()
 
-    # Bollinger Bands
     bb = ta.volatility.BollingerBands(df["close"], window=20, window_dev=2)
     df["bb_high"] = bb.bollinger_hband()
     df["bb_mid"] = bb.bollinger_mavg()
     df["bb_low"] = bb.bollinger_lband()
 
-    df["target_return_1d"] = df["close"].pct_change().shift(-1)
-    df["target_direction"] = (df["target_return_1d"] > 0).astype(int)
+    # ADX
+    df["adx_14"] = ta.trend.ADXIndicator(df["high"], df["low"], df["close"], window=14).adx()
+
+    # Weighted MA
+    df["wma_20"] = df["close"].rolling(20).apply(lambda x: (x * np.arange(1,21)).sum() / np.arange(1,21).sum(), raw=True)
+
+    # ticker_id (encode manually)
+    df["ticker_id"] = hash(ticker_name) % 1000
+
     df = df.dropna().reset_index(drop=True)
 
-    df.to_csv(f"data/{ticker}_data.csv", index=False)
+    return df
 
-    return f"Preprocessed data for {ticker} saved to data/{ticker}_ml_ready.csv"
 
 if __name__ == "__main__":
     # Example usage

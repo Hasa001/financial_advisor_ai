@@ -1,22 +1,22 @@
-# --- Backend ---
 fastapi
 uvicorn[standard]
 pydantic
-python-dotenv
-
-# --- ML Model & Features ---
+joblib
 pandas
 numpy
 scikit-learn
-catboost
-joblib
-ta
-optuna
-
-# --- Azure OpenAI & RAG ---
-openai
+sentence-transformers
+sentencepiece
+transformers
+torch               # CPU or GPU build as needed
+langchain
+python-dotenv
+azure-search-documents==11.6.0
 azure-identity
-azure-search-documents
-
-# --- Utilities ---
+azure-core
+azure-ai-agents     # if you use agents features (only if needed)
+azure-ai-textanalytics  # if you call text analytics
 requests
+catboost            # only if your model was trained using CatBoost
+lightgbm            # optional alternative
+tqdm

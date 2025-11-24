@@ -1,42 +1,21 @@
-from rag.ingestion.load_news import load_news_csv
-from rag.ingestion.embedder import get_embedding_model, embed_texts
-from rag.ingestion.indexer import create_news_index, upload_news
+# backend/rag/ingestion/ingest_pipeline.py
+import os
+from dotenv import load_dotenv
+load_dotenv()
+from backend.fastapi_app.rss_fetcher import fetch_rss_entries
+from .rolling_ingest import run_rolling_ingestion
+import pandas as pd
 
+def run_from_csv(csv_path):
+    df = pd.read_csv(csv_path)
+    run_rolling_ingestion(df)
 
-def run_ingestion(csv_path: str, index_name: str):
-    print("Loading news...")
-    df = load_news_csv(csv_path)
-
-    print("Loading embedding model...")
-    model = get_embedding_model()
-
-    print("Generating embeddings...")
-    vectors = embed_texts(model, df["content"].tolist())
-    print(type(vectors[0][0]))
-
-    print("Creating index...")
-    create_news_index(index_name)
-
-    print("Uploading documents...")
-    docs = []
-    for i in range(len(df)):
-        row = df.iloc[i]
-        docs.append({
-            "id": str(i),
-            "content": row["content"],
-            "url": row["link"],
-            "date": str(row["published"]),
-            "content_vector": vectors[i]
-        })
-
-    print(f"DOCUMENTS------{docs}")
-
-    upload_news(index_name, docs)
-
-    print("Ingestion complete.")
+def run_from_rss():
+    df_entries = fetch_rss_entries()
+    import pandas as pd
+    df = pd.DataFrame(df_entries)
+    run_rolling_ingestion(df)
 
 if __name__ == "__main__":
-    CSV_PATH = "data/news_raw.csv"  # Path to your news CSV
-    INDEX_NAME = "market_news_index"        # Desired Azure Search index name
-
-    run_ingestion(CSV_PATH, INDEX_NAME)
+    # default: ingest live RSS into azure (last 30 days)
+    run_from_rss()

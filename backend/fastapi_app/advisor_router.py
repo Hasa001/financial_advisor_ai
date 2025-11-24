@@ -1,66 +1,88 @@
-# advisor_router.py
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+# backend/fastapi_app/advisor_router.py
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse, JSONResponse
 import pandas as pd
+from .identify_index import detect_index
+from .chart_generator import generate_chart_bytes, fetch_ohlcv
 from .preprocess import preprocess_input
-from .advisor_service import (
-    get_embedding_model, embed_texts_pyfloat, predict_ml,
-    fetch_relevant_news, synthesize_advice, get_search_client
-)
-from .query_embed import get_embedding_model as _get_embedding_model
+from .advisor_service import generate_advice_for_query, fetch_news_for_index, fetch_relevant_news_text
+from .ticker_db import CANONICAL
 
 router = APIRouter()
 
-class AdvisorRequest(BaseModel):
-    # include only the raw features that your preprocess expects
-    # keep same fields you used for PredictionRequest earlier
-    ticker: str
-    open: float
-    high: float
-    low: float
-    close: float
-    volume: float
-    # ... add all engineered features you require OR accept a preprocessed payload
-    # to simplify, we accept a preprocessed row as mapping
-    features: dict
-    user_query: str = None
+@router.post("/identify")
+def identify(req: dict):
+    q = req.get("query","")
+    if not q:
+        raise HTTPException(status_code=400, detail="Missing 'query'")
+    ticker, matched, score, method = detect_index(q)
+    return {"query": q, "ticker": ticker, "matched": matched, "score": score, "method": method}
 
-class AdvisorResponse(BaseModel):
-    prediction: str
-    direction: int
-    confidence: float
-    news: list
-    advice: str
-
-@router.post("/advisor", response_model=AdvisorResponse)
-def advisor_endpoint(req: AdvisorRequest):
-    # Build DataFrame from features (client must send all required feature columns)
-    df = pd.DataFrame([req.features])
-    # Preprocess (reorders columns and validates)
+@router.get("/chart_by_choice")
+def chart_by_choice(choice: str = Query(...), period: str = Query("1mo")):
+    key = choice.lower().strip()
+    ticker = CANONICAL.get(key)
+    if not ticker:
+        t,_,_,_ = detect_index(choice)
+        ticker = t
+    if not ticker:
+        return JSONResponse({"error":"Cannot map choice to ticker"}, status_code=400)
     try:
-        processed = preprocess_input(df)
+        buf = generate_chart_bytes(ticker, period=period)
+        return StreamingResponse(buf, media_type="image/png")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Preprocess error: {e}")
+        return JSONResponse({"error": f"Chart generation failed: {e}"}, status_code=500)
 
-    # ML predict
-    direction, confidence = predict_ml(processed)
-    prediction = "UP" if direction == 1 else "DOWN"
+@router.get("/news_by_choice")
+def news_by_choice(choice: str = Query(...), k: int = Query(6)):
+    q = f"{choice} market RBI monetary policy"
+    try:
+        docs = fetch_relevant_news_text(q, k=k)
+        return {"choice": choice, "news": docs}
+    except Exception as e:
+        return JSONResponse({"error": f"News fetch failed: {e}"}, status_code=500)
 
-    # create query vector (embed user_query OR content of ticker as fallback)
-    embed_model = _get_embedding_model()
-    query_text = req.user_query if req.user_query else f"{req.ticker} market news"
-    query_vector = embed_texts_pyfloat(embed_model, [query_text])[0]
+@router.post("/ask")
+def ask(req: dict):
+    q = req.get("query","")
+    if not q:
+        raise HTTPException(status_code=400, detail="Missing 'query'")
+    ticker, matched, score, method = detect_index(q)
+    if not ticker:
+        return JSONResponse({"error":"Could not detect index from query."}, status_code=400)
+    index_name = matched.upper() if matched else ticker
+    try:
+        df = fetch_ohlcv(ticker)
+        latest = df.iloc[-1]
+        daily_change_pct = float((latest["Close"]-latest["Open"])/latest["Open"])
+    except Exception as e:
+        return JSONResponse({"error": f"Live data fetch failed: {e}"}, status_code=500)
 
-    # fetch news
-    news_docs = fetch_relevant_news(query_vector, k=5)
+    # optional features for ML
+    features_df = None
+    ml_prediction=None; ml_conf=None
+    if "features" in req:
+        try:
+            df_feat = pd.DataFrame([req["features"]])
+            processed = preprocess_input(df_feat)
+            features_df = processed
+        except Exception as e:
+            return JSONResponse({"error": f"Feature preprocessing failed: {e}"}, status_code=400)
 
-    # synthesize advice
-    advice = synthesize_advice(prediction, confidence, news_docs, req.user_query)
+    try:
+        result = generate_advice_for_query(user_query=q, ticker=ticker, index_name=index_name, features_df=features_df, k=int(req.get("k",6)))
+    except Exception as e:
+        return JSONResponse({"error": f"Generation failed: {e}"}, status_code=500)
 
-    return AdvisorResponse(
-        prediction=prediction,
-        direction=direction,
-        confidence=confidence,
-        news=news_docs,
-        advice=advice
-    )
+    return {
+        "index_detected": index_name,
+        "ticker": ticker,
+        "detection_method": method,
+        "detection_confidence": score,
+        "latest_close": float(latest["Close"]),
+        "daily_change_pct": daily_change_pct,
+        "ml_label": result.get("ml_label"),
+        "ml_confidence": result.get("ml_confidence"),
+        "news": result.get("news"),
+        "llm": result.get("llm")
+    }
